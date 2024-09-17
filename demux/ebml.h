@@ -1,19 +1,18 @@
 /*
- * This file is part of MPlayer.
+ * This file is part of mpv.
  *
- * MPlayer is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  *
- * MPlayer is distributed in the hope that it will be useful,
+ * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License along
- * with MPlayer; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef MPLAYER_EBML_H
@@ -24,7 +23,7 @@
 #include <stdbool.h>
 
 #include "stream/stream.h"
-#include "bstr/bstr.h"
+#include "misc/bstr.h"
 
 struct mp_log;
 
@@ -79,11 +78,13 @@ struct ebml_parse_ctx {
 #define EBML_UINT_INVALID   UINT64_MAX
 #define EBML_INT_INVALID    INT64_MAX
 
+/* Block Addition Mappings */
+#define MATROSKA_BLOCK_ADD_ID_TYPE_ITU_T_T35 4
+
 bool ebml_is_mkv_level1_id(uint32_t id);
 uint32_t ebml_read_id (stream_t *s);
-uint64_t ebml_read_vlen_uint (bstr *buffer);
-int64_t ebml_read_vlen_int (bstr *buffer);
 uint64_t ebml_read_length (stream_t *s);
+int64_t ebml_read_signed_length(stream_t *s);
 uint64_t ebml_read_uint (stream_t *s);
 int64_t ebml_read_int (stream_t *s);
 int ebml_read_skip(struct mp_log *log, int64_t end, stream_t *s);

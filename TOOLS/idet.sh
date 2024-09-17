@@ -1,23 +1,15 @@
 #!/bin/sh
 
-case "$0" in
-    */*)
-        MYDIR=${0%/*}
-        ;;
-    *)
-        MYDIR=.
-        ;;
-esac
+: "${MPV:=mpv}"
+: "${ILDETECT_MPV:=$MPV}"
+: "${ILDETECT_MPVFLAGS:=--start=35% --length=35}"
+: "${ILDETECT_DRY_RUN:=}"
+: "${ILDETECT_QUIET:=}"
+: "${ILDETECT_RUN_INTERLACED_ONLY:=}"
+: "${ILDETECT_FORCE_RUN:=}"
 
-: ${MPV:=mpv}
-: ${ILDETECT_MPV:=$MPV}
-: ${ILDETECT_MPV:=$MPV}
-: ${ILDETECT_MPVFLAGS:=--start=35% --length=35}
-: ${ILDETECT_DRY_RUN:=}
-: ${ILDETECT_QUIET:=}
-: ${ILDETECT_RUN_INTERLACED_ONLY:=}
-: ${ILDETECT_FORCE_RUN:=}
-: ${MAKE:=make}
+# This script uses ffmpeg's "idet" filter for interlace detection. In the
+# long run this should replace ildetect.sh+ildetect.so.
 
 # exit status:
 # 0 progressive
@@ -30,61 +22,66 @@ esac
 testfun()
 {
     $ILDETECT_MPV "$@" \
-        --vf-add=lavfi="[idet]" --msg-level ffmpeg=v \
+        --vf-add=lavfi="[idet]" --msg-level=ffmpeg=v \
         --o= --vo=null --no-audio --untimed \
         $ILDETECT_MPVFLAGS \
         | { if [ -n "$ILDETECT_QUIET" ]; then cat; else tee /dev/stderr; fi } \
-        | grep "Parsed_idet_0: Multi frame detection: " | tail -n 1
+        | grep "Parsed_idet_0: Multi frame detection: "
 }
 
 judge()
 {
-    out=`testfun "$@"`
-
-    tff=${out##* TFF:}; tff=${tff%% *}
-    bff=${out##* BFF:}; bff=${bff%% *}
-    progressive=${out##* Progressive:}; progressive=${progressive%% *}
-    undetermined=${out##* Undetermined:}; undetermined=${undetermined%% *}
-
-    case "$tff$bff$progressive$undetermined" in
-        *[!0-9]*)
-            echo >&2 "ERROR: Unrecognized idet output: $out"
-            exit 16
-            ;;
-    esac
+    tff=0
+    bff=0
+    progressive=0
+    undetermined=0
+    while read -r _ _ _ _ _ _ tff1 _ bff1 _ progressive1 _ undetermined1 _; do
+        case "$tff1$bff1$progressive1$undetermined1" in
+            *[!0-9]*)
+                printf >&2 'ERROR: Unrecognized idet output: %s\n' "$out"
+                exit 16
+                ;;
+        esac
+        tff=$((tff + tff1))
+        bff=$((bff + bff1))
+        progressive=$((progressive + progressive1))
+        undetermined=$((undetermined + undetermined1))
+    done <<EOF
+$(testfun "$@" | sed 's/:/: /g')
+EOF
 
     interlaced=$((bff + tff))
     determined=$((interlaced + progressive))
 
-    if [ $undetermined -gt $determined ] || [ $determined -lt 250 ]; then
+    if [ "$undetermined" -gt "$determined" ] || [ "$determined" -lt 250 ]; then
         echo >&2 "ERROR: Less than 50% or 250 frames are determined."
         [ -n "$ILDETECT_FORCE_RUN" ] || exit 8
         echo >&2 "Assuming interlacing."
-        if [ $tff -gt $((bff * 10)) ]; then
-            verdict=interlaced-tff
-        elif [ $bff -gt $((tff * 10)) ]; then
-            verdict=interlaced-bff
+        if [ "$tff" -gt $((bff * 10)) ]; then
+            verdict="interlaced-tff"
+        elif [ "$bff" -gt $((tff * 10)) ]; then
+            verdict="interlaced-bff"
         else
-            verdict=interlaced
+            verdict="interlaced"
         fi
-    elif [ $((interlaced * 20)) -gt $progressive ]; then
+    elif [ $((interlaced * 20)) -gt "$progressive" ]; then
         # At least 5% of the frames are interlaced!
-        if [ $tff -gt $((bff * 10)) ]; then
-            verdict=interlaced-tff
-        elif [ $bff -gt $((tff * 10)) ]; then
-            verdict=interlaced-bff
+        if [ "$tff" -gt $((bff * 10)) ]; then
+            verdict="interlaced-tff"
+        elif [ "$bff" -gt $((tff * 10)) ]; then
+            verdict="interlaced-bff"
         else
             echo >&2 "ERROR: Content is interlaced, but can't determine field order."
             [ -n "$ILDETECT_FORCE_RUN" ] || exit 8
             echo >&2 "Assuming interlacing with default field order."
-            verdict=interlaced
+            verdict="interlaced"
         fi
     else
-        # Likely progrssive.
-        verdict=progressive
+        # Likely progressive
+        verdict="progressive"
     fi
 
-    echo "$verdict"
+    printf '%s\n' "$verdict"
 }
 
 judge "$@" --vf-clr
@@ -94,43 +91,43 @@ case "$verdict" in
             [ -n "$ILDETECT_RUN_INTERLACED_ONLY" ] || \
             $ILDETECT_MPV "$@"
         r=$?
-        [ $r -eq 0 ] || exit $(($r | 16))
+        [ $r -eq 0 ] || exit $((r | 16))
         exit 0
         ;;
     interlaced-tff)
-        judge "$@" --vf-clr --vf-pre=pullup --field-dominance=top
+        judge "$@" --vf-clr --vf-pre=lavfi=\[setfield=tff\],pullup
         case "$verdict" in
             progressive)
                 [ -n "$ILDETECT_DRY_RUN" ] || \
-                    $ILDETECT_MPV "$@" --vf-pre=pullup --field-dominance=top
+                    $ILDETECT_MPV "$@" --vf-pre=lavfi=\[setfield=tff\],pullup
                 r=$?
-                [ $r -eq 0 ] || exit $(($r | 16))
+                [ $r -eq 0 ] || exit $((r | 16))
                 exit 1
                 ;;
             *)
                 [ -n "$ILDETECT_DRY_RUN" ] || \
-                    $ILDETECT_MPV "$@" --vf-pre=yadif --field-dominance=top
+                    $ILDETECT_MPV "$@" --vf-pre=lavfi=\[setfield=tff\],yadif
                 r=$?
-                [ $r -eq 0 ] || exit $(($r | 16))
+                [ $r -eq 0 ] || exit $((r | 16))
                 exit 2
                 ;;
         esac
         ;;
     interlaced-bff)
-        judge "$@" --vf-clr --vf-pre=pullup --field-dominance=bottom
+        judge "$@" --vf-clr --vf-pre=lavfi=\[setfield=bff\],pullup
         case "$verdict" in
             progressive)
                 [ -n "$ILDETECT_DRY_RUN" ] || \
-                    $ILDETECT_MPV "$@" --vf-pre=pullup --field-dominance=bottom
+                    $ILDETECT_MPV "$@" --vf-pre=lavfi=\[setfield=bff\],pullup
                 r=$?
-                [ $r -eq 0 ] || exit $(($r | 16))
+                [ $r -eq 0 ] || exit $((r | 16))
                 exit 1
                 ;;
             *)
                 [ -n "$ILDETECT_DRY_RUN" ] || \
-                    $ILDETECT_MPV "$@" --vf-pre=yadif --field-dominance=bottom
+                    $ILDETECT_MPV "$@" --vf-pre=lavfi=\[setfield=bff\],yadif
                 r=$?
-                [ $r -eq 0 ] || exit $(($r | 16))
+                [ $r -eq 0 ] || exit $((r | 16))
                 exit 2
                 ;;
         esac
@@ -142,14 +139,14 @@ case "$verdict" in
                 [ -n "$ILDETECT_DRY_RUN" ] || \
                     $ILDETECT_MPV "$@" --vf-pre=pullup
                 r=$?
-                [ $r -eq 0 ] || exit $(($r | 16))
+                [ $r -eq 0 ] || exit $((r | 16))
                 exit 1
                 ;;
             *)
                 [ -n "$ILDETECT_DRY_RUN" ] || \
                     $ILDETECT_MPV "$@" --vf-pre=yadif
                 r=$?
-                [ $r -eq 0 ] || exit $(($r | 16))
+                [ $r -eq 0 ] || exit $((r | 16))
                 exit 2
                 ;;
         esac

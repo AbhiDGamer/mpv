@@ -1,0 +1,168 @@
+Release 0.38.0
+==============
+
+This release requires FFmpeg 4.4 or newer and libplacebo 6.338.2 or newer.
+
+The new improved renderer (vo_gpu_next) is being worked on and not the default yet.
+
+
+Features
+--------
+
+New
+~~~
+
+- scripting: add mp.input()
+- player: add an option to automatically turn on deinterlacing
+- mac: add more Now Playing information and functionality
+- osxbundle: automatically include MoltenVK to enable Vulkan support
+- input.conf: bind Ctrl+WHEEL_UP/DOWN to video-zoom
+- ao_avfoundation: initial support for AVFoundation audio driver (macOS)
+- vo: add context menu support on win32
+
+
+Changed
+~~~~~~~
+
+- osc: allow disabling special mouse wheel behavior
+- mac: add support for dynamic change of geometry, autofit
+- x11_common: allow DPI scale in unit of 0.5 and prefer the value from Xft.dpi
+- vo_gpu_next: save cache to separate files
+- mac: large amounts of refactoring, internal improvements and cleanups
+- builtin.conf: remove debanding from the high-quality profile
+
+
+Removed
+~~~~~~~
+
+- player: remove legacy, non-standard Raspberry Pi-specific support code
+
+
+Options and Commands
+--------------------
+
+Added
+~~~~~
+
+- options: add secondary-sub-delay
+- options: add --osd-bar-border-size
+- filter_sdh: add --sub-filter-sdh-enclosures option
+- options: add --secondary-sub-ass-override
+- audio: add --volume-gain option to control volume in decibels
+- command: export current-gpu-context property
+- sub: add --sub-lavc-o option
+- command: add load-config-file and load-input-conf
+- input: add --input-preprocess-wheel option
+- player: add loadfile/loadlist insert-next commands
+- input: rework window dragging to be command controllable
+- options: add --deinterlace-field-parity option
+- vo: add video-target-params property
+- options: add --input-commands that runs commands at startup
+
+
+Changed
+~~~~~~~
+
+- player/command: add ability to scale overlay
+- mac: add support for window-id property and --drag-and-drop
+- command: support passing scale to `keypress`
+- mac: add support for --auto-window-resize, --input-cursor-passthrough options
+- win32: add support for --input-cursor-passthrough option
+- x11_common: support --title-bar
+- sub: allow setting special page numbers via --teletext_page
+- player: set --hidpi-window-scale to no by default
+- osd_libass: update the OSD bar's dent and border size
+- player: remove --alpha and rename --background to --background-color
+- options: remove --focus-on-open and add --focus-on
+
+
+Removed
+~~~~~~~
+
+- player: remove --term-remaining-playtime option
+
+
+Fixes and Minor Enhancements
+----------------------------
+
+- vaapi: add support for vaapi-win32
+- ao/coreaudio_exclusive: fix segfault when changing formats
+- mac: fix libmpv usage without embedding
+- build: only directly link shaderc and spirv-cross on windows
+- build: enable dvbin by default again
+- playloop: use a 16:9 ratio with --force-window
+- mac: report modifier keys on precise scrolling
+- input: fix double click handling
+- input: add missing forward media key ('GO_FORWARD')
+- sub: don't busy loop if the player is paused for cache
+- playlist: correctly populate playlist-path with the --playlist option
+- win32: opt in to the windows segment heap
+- demux_lavf: remove fix_editlists hack for mp4
+- wayland: fix key modifier handling again
+- win32: re-enable IME
+- wayland_common: guard against negative configure sizes
+- demux_lavf: detect ico as images
+- bash-completion: parse the mpv options lazily
+- f_auto_filters: use bwdif_cuda for deinterlacing with cuda hwdec
+- command: do a normal seek instead of a refresh seek when switching vo
+- ad_spdif: fix DTS 44.1khz passthrough playback
+- vo_dmabuf_wayland: scale smarter in hidpi situations
+- hwdec_drmprime: add P010 and P210 support
+- wayland: look for "default" cursor as well as "left_ptr"
+- wayland_common: properly handle high resolution scrolling
+- vo_vdpau: fix timing for nanoseconds
+- demux_mkv: add tags for A_MPEG/L1 (mp1) audio and FFV1 video
+- osdep: fix infinite loop when cancelling subprocess
+- dec_sub: expand sub packet caching
+- player/sub: avoid wasteful subtitle redraws
+- ao_pipewire: add support for SPDIF formats
+- wayland_common: implement multi-seat support
+- vo: make libmpv last in the auto-probing order for cocoa-cb only
+- player/loadfile: rewrite sub autoselection logic
+- meson: add custom target for macOS App bundling
+- image_writer: cleanup leftover files if image writing fails
+- sub: fix LRC lines with multiple timestamps
+- ao: don't clip floating point formats at non-unity gain
+- wayland: remove old sway/wlroots hack
+- hwdec/dmabuf_interop_gl: migrate to EXT_EGL_image_storage on desktop GL
+- sd_ass: don't wrongly recognize \pos as \p
+- ao_audiotrack: fix missing check for passthrough support
+- wayland_common: log if Drag-and-Drop fails
+- vo_gpu_next: render subtitles at video colorspace
+- swresample: stop using deprecated {in,out}_channel_layout options
+- path: don't load any files if --no-config is passed (incl. cache and state)
+- vo_gpu/vo_gpu_next: fix transparency with GLX
+- wayland_common: require WAYLAND_DISPLAY to be set for initialization
+- vo_drm: add support for BGR formats and YUYV
+- stream: enable caching for sockets, pipes and FIFOs
+- ao_coreaudio: stop audio unit after idle timeout
+- vo_gpu_next: add support for --dither-depth=auto
+- vo_gpu_next: don't render ASS subtitles at HDR colorspace
+- video/image_writer: attach MDVC metadata and CLLI metadata
+- win32: resolve dropped shell links (Windows shortcuts)
+- af_lavcac3enc: fix memory leak on 2ch audio
+- win32: increase hires timer resolution
+- input: raise maximum key down limit to 16
+- input: remove max active section limit
+- video/egl_helpers: fix fallback logic for EGL_KHR_create_context
+- ao_pulse: reenable latency hacks by default
+- hwdec/vulkan: enable the stable AV1 extension
+- af_scaletempo2: fix false reporting of frame availability
+- win32: fix native key repeat support
+- ao_pipewire: fix some buffer size / timing calculations
+- audio: pause handling improvements for pull-based AOs
+- ad_spdif: specify missing media type and sample rate
+- mac/vulkan: add support for frame timing via presentation feedback
+- demux_mkv: corrected direction of ProjectionPoseRoll rotation
+- demux_mkv: add support for BCP 47 language tags
+- player: avoid busy looping during subtitle track switches
+
+
+This listing is not complete. Check DOCS/client-api-changes.rst for a history
+of changes to the client API, and DOCS/interface-changes.rst for a history
+of changes to other user-visible interfaces.
+
+A complete changelog can be seen by running `git log v0.37.0..v0.38.0`
+in the git repository or by visiting either
+https://github.com/mpv-player/mpv/compare/v0.37.0...v0.38.0 or
+https://git.srsfckn.biz/mpv/log/?qt=range&q=v0.37.0..v0.38.0

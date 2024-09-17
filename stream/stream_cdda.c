@@ -1,54 +1,51 @@
 /*
- * This file is part of MPlayer.
- *
  * Original author: Albeu
  *
- * MPlayer is free software; you can redistribute it and/or modify
+ * This file is part of mpv.
+ *
+ * mpv is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
  *
- * MPlayer is distributed in the hope that it will be useful,
+ * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License along
- * with MPlayer; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "config.h"
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #include <cdio/cdio.h>
 
-#if CDIO_API_VERSION < 6
-#define OLD_API
+// For cdio_cddap_version
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-prototypes"
+#ifndef TESTING_IS_FINISHED
+// Suppress Wundef warning
+#define TESTING_IS_FINISHED 0
 #endif
-
-#ifdef OLD_API
-#include <cdio/cdda.h>
-#include <cdio/paranoia.h>
-#else
 #include <cdio/paranoia/cdda.h>
 #include <cdio/paranoia/paranoia.h>
-#endif
+#pragma GCC diagnostic pop
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdbool.h>
-
-#include "osdep/endian.h"
-
-#include "talloc.h"
+#include "common/msg.h"
+#include "config.h"
+#include "mpv_talloc.h"
 
 #include "stream.h"
 #include "options/m_option.h"
 #include "options/m_config.h"
 #include "options/options.h"
-#include "compat/mpbswap.h"
 
-#include "common/msg.h"
+#if !HAVE_GPL
+#error GPL only
+#endif
 
 typedef struct cdda_params {
     cdrom_drive_t *cd;
@@ -56,59 +53,45 @@ typedef struct cdda_params {
     int sector;
     int start_sector;
     int end_sector;
+    uint8_t *data;
+    size_t data_pos;
 
     // options
+    char *cdda_device;
     int speed;
     int paranoia_mode;
     int sector_size;
     int search_overlap;
-    int toc_bias;
     int toc_offset;
-    int skip;
+    bool skip;
     char *device;
     int span[2];
+    bool cdtext;
 } cdda_priv;
 
 #define OPT_BASE_STRUCT struct cdda_params
-
-static const m_option_t cdda_params_fields[] = {
-    OPT_INTPAIR("span", span, 0),
-    OPT_INTRANGE("speed", speed, 0, 1, 100),
-    OPT_STRING("device", device, 0),
-    {0}
-};
-
 const struct m_sub_options stream_cdda_conf = {
     .opts = (const m_option_t[]) {
-        OPT_INTRANGE("speed", speed, 0, 1, 100),
-        OPT_INTRANGE("paranoia", paranoia_mode, 0, 0, 2),
-        OPT_INTRANGE("sector-size", sector_size, 0, 1, 100),
-        OPT_INTRANGE("overlap", search_overlap, 0, 0, 75),
-        OPT_INT("toc-bias", toc_bias, 0),
-        OPT_INT("toc-offset", toc_offset, 0),
-        OPT_FLAG("skip", skip, 0),
-        OPT_STRING("device", device, 0),
-        OPT_INTPAIR("span", span, 0),
+        {"device", OPT_STRING(cdda_device), .flags = M_OPT_FILE},
+        {"speed", OPT_INT(speed), M_RANGE(1, 100)},
+        {"paranoia", OPT_INT(paranoia_mode), M_RANGE(0, 2)},
+        {"sector-size", OPT_INT(sector_size), M_RANGE(1, 100)},
+        {"overlap", OPT_INT(search_overlap), M_RANGE(0, 75)},
+        {"toc-offset", OPT_INT(toc_offset)},
+        {"skip", OPT_BOOL(skip)},
+        {"span-a", OPT_INT(span[0])},
+        {"span-b", OPT_INT(span[1])},
+        {"cdtext", OPT_BOOL(cdtext)},
         {0}
     },
     .size = sizeof(struct cdda_params),
     .defaults = &(const struct cdda_params){
         .search_overlap = -1,
-        .skip = 1,
+        .skip = true,
     },
 };
 
 static const char *const cdtext_name[] = {
-#ifdef OLD_API
-    [CDTEXT_ARRANGER] = "Arranger",
-    [CDTEXT_COMPOSER] = "Composer",
-    [CDTEXT_MESSAGE]  =  "Message",
-    [CDTEXT_ISRC] =  "ISRC",
-    [CDTEXT_PERFORMER] = "Performer",
-    [CDTEXT_SONGWRITER] =  "Songwriter",
-    [CDTEXT_TITLE] =  "Title",
-    [CDTEXT_UPC_EAN] = "UPC_EAN",
-#else
     [CDTEXT_FIELD_ARRANGER] = "Arranger",
     [CDTEXT_FIELD_COMPOSER] = "Composer",
     [CDTEXT_FIELD_MESSAGE]  =  "Message",
@@ -117,26 +100,19 @@ static const char *const cdtext_name[] = {
     [CDTEXT_FIELD_SONGWRITER] =  "Songwriter",
     [CDTEXT_FIELD_TITLE] =  "Title",
     [CDTEXT_FIELD_UPC_EAN] = "UPC_EAN",
-#endif
 };
 
-static bool print_cdtext(stream_t *s, int track)
+static void print_cdtext(stream_t *s, int track)
 {
     cdda_priv* p = (cdda_priv*)s->priv;
-#ifdef OLD_API
-    cdtext_t *text = cdio_get_cdtext(p->cd->p_cdio, track);
-#else
+    if (!p->cdtext)
+        return;
     cdtext_t *text = cdio_get_cdtext(p->cd->p_cdio);
-#endif
     int header = 0;
     if (text) {
         for (int i = 0; i < sizeof(cdtext_name) / sizeof(cdtext_name[0]); i++) {
             const char *name = cdtext_name[i];
-#ifdef OLD_API
-            const char *value = cdtext_get_const(i, text);
-#else
             const char *value = cdtext_get_const(text, i, track);
-#endif
             if (name && value) {
                 if (!header)
                     MP_INFO(s, "CD-Text (%s):\n", track ? "track" : "CD");
@@ -144,9 +120,7 @@ static bool print_cdtext(stream_t *s, int track)
                 MP_INFO(s, "  %s: '%s'\n", name, value);
             }
         }
-        return true;
     }
-    return false;
 }
 
 static void print_track_info(stream_t *s, int track)
@@ -159,39 +133,26 @@ static void cdparanoia_callback(long int inpos, paranoia_cb_mode_t function)
 {
 }
 
-static int fill_buffer(stream_t *s, char *buffer, int max_len)
+static int fill_buffer(stream_t *s, void *buffer, int max_len)
 {
     cdda_priv *p = (cdda_priv *)s->priv;
-    int16_t *buf;
-    int i;
 
-    if (max_len < CDIO_CD_FRAMESIZE_RAW)
-        return -1;
+    if (!p->data || p->data_pos >= CDIO_CD_FRAMESIZE_RAW) {
+        if ((p->sector < p->start_sector) || (p->sector > p->end_sector))
+            return 0;
 
-    if ((p->sector < p->start_sector) || (p->sector > p->end_sector)) {
-        return 0;
+        p->data_pos = 0;
+        p->data = (uint8_t *)paranoia_read(p->cdp, cdparanoia_callback);
+        if (!p->data)
+            return 0;
+
+        p->sector++;
     }
 
-    buf = paranoia_read(p->cdp, cdparanoia_callback);
-    if (!buf)
-        return 0;
-
-#if BYTE_ORDER == BIG_ENDIAN
-    for (i = 0; i < CDIO_CD_FRAMESIZE_RAW / 2; i++)
-        buf[i] = le2me_16(buf[i]);
-#endif
-
-    p->sector++;
-    memcpy(buffer, buf, CDIO_CD_FRAMESIZE_RAW);
-
-    for (i = 0; i < p->cd->tracks; i++) {
-        if (p->cd->disc_toc[i].dwStartSector == p->sector - 1) {
-            print_track_info(s, i + 1);
-            break;
-        }
-    }
-
-    return CDIO_CD_FRAMESIZE_RAW;
+    size_t copy = MPMIN(CDIO_CD_FRAMESIZE_RAW - p->data_pos, max_len);
+    memcpy(buffer, p->data + p->data_pos, copy);
+    p->data_pos += copy;
+    return copy;
 }
 
 static int seek(stream_t *s, int64_t newpos)
@@ -235,7 +196,6 @@ static void close_cdda(stream_t *s)
     cdda_priv *p = (cdda_priv *)s->priv;
     paranoia_free(p->cdp);
     cdda_close(p->cd);
-    free(p);
 }
 
 static int get_track_by_sector(cdda_priv *p, unsigned int sector)
@@ -251,11 +211,6 @@ static int control(stream_t *stream, int cmd, void *arg)
 {
     cdda_priv *p = stream->priv;
     switch (cmd) {
-    case STREAM_CTRL_GET_NUM_TITLES:
-    {
-      *(unsigned int *)arg = p->cd->tracks;
-      return STREAM_OK;
-    }
     case STREAM_CTRL_GET_NUM_CHAPTERS:
     {
         int start_track = get_track_by_sector(p, p->start_sector);
@@ -270,11 +225,11 @@ static int control(stream_t *stream, int cmd, void *arg)
         int track = *(double *)arg;
         int start_track = get_track_by_sector(p, p->start_sector);
         int end_track = get_track_by_sector(p, p->end_sector);
-        track += start_track + 1;
+        track += start_track;
         if (track > end_track)
             return STREAM_ERROR;
         int64_t sector = p->cd->disc_toc[track].dwStartSector;
-        int64_t pos = sector * (CDIO_CD_FRAMESIZE_RAW + 1) - 1;
+        int64_t pos = sector * CDIO_CD_FRAMESIZE_RAW;
         // Assume standard audio CD: 44.1khz, 2 channels, s16 samples
         *(double *)arg = pos / (44100.0 * 2 * 2);
         return STREAM_OK;
@@ -283,8 +238,15 @@ static int control(stream_t *stream, int cmd, void *arg)
     return STREAM_UNSUPPORTED;
 }
 
+static int64_t get_size(stream_t *st)
+{
+    cdda_priv *p = st->priv;
+    return (p->end_sector + 1 - p->start_sector) * CDIO_CD_FRAMESIZE_RAW;
+}
+
 static int open_cdda(stream_t *st)
 {
+    st->priv = mp_get_config_group(st, st->global, &stream_cdda_conf);
     cdda_priv *priv = st->priv;
     cdda_priv *p = priv;
     int mode = p->paranoia_mode;
@@ -292,12 +254,12 @@ static int open_cdda(stream_t *st)
     cdrom_drive_t *cdd = NULL;
     int last_track;
 
-    if (!p->device || !p->device[0]) {
-        talloc_free(p->device);
-        if (st->opts->cdrom_device && st->opts->cdrom_device[0])
-            p->device = talloc_strdup(NULL, st->opts->cdrom_device);
-        else
-            p->device = talloc_strdup(NULL, DEFAULT_CDROM_DEVICE);
+    if (st->path[0]) {
+        p->device = st->path;
+    } else if (p->cdda_device && p->cdda_device[0]) {
+        p->device = p->cdda_device;
+    } else {
+        p->device = DEFAULT_CDROM_DEVICE;
     }
 
 #if defined(__NetBSD__)
@@ -322,13 +284,9 @@ static int open_cdda(stream_t *st)
         return STREAM_ERROR;
     }
 
-    priv = malloc(sizeof(cdda_priv));
-    memset(priv, 0, sizeof(cdda_priv));
     priv->cd = cdd;
 
-    if (p->toc_bias)
-        offset -= cdda_track_firstsector(cdd, 1);
-
+    offset -= cdda_track_firstsector(cdd, 1);
     if (offset) {
         for (int n = 0; n < cdd->tracks + 1; n++)
             cdd->disc_toc[n].dwStartSector += offset;
@@ -387,17 +345,16 @@ static int open_cdda(stream_t *st)
     priv->sector = priv->start_sector;
 
     st->priv = priv;
-    st->end_pos =
-        (priv->end_sector + 1 - priv->start_sector) * CDIO_CD_FRAMESIZE_RAW;
-    st->sector_size = CDIO_CD_FRAMESIZE_RAW;
 
     st->fill_buffer = fill_buffer;
     st->seek = seek;
     st->seekable = true;
     st->control = control;
+    st->get_size = get_size;
     st->close = close_cdda;
 
-    st->type = STREAMTYPE_CDDA;
+    st->streaming = true;
+
     st->demuxer = "+disc";
 
     print_cdtext(st, 0);
@@ -405,22 +362,9 @@ static int open_cdda(stream_t *st)
     return STREAM_OK;
 }
 
-static void *get_defaults(stream_t *st)
-{
-    return m_sub_options_copy(st, &stream_cdda_conf, st->opts->stream_cdda_opts);
-}
-
 const stream_info_t stream_info_cdda = {
     .name = "cdda",
     .open = open_cdda,
     .protocols = (const char*const[]){"cdda", NULL },
-    .priv_size = sizeof(cdda_priv),
-    .get_defaults = get_defaults,
-    .options = cdda_params_fields,
-    .url_options = (const char*const[]){
-        "hostname=span",
-        "port=speed",
-        "filename=device",
-        NULL
-    },
+    .stream_origin = STREAM_ORIGIN_UNSAFE,
 };

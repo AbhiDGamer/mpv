@@ -2,66 +2,63 @@
  * precise timer routines for Linux/UNIX
  * copyright (C) LGB & A'rpi/ASTRAL
  *
- * This file is part of MPlayer.
+ * This file is part of mpv.
  *
- * MPlayer is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  *
- * MPlayer is distributed in the hope that it will be useful,
+ * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License along
- * with MPlayer; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <unistd.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <time.h>
-#include <sys/time.h>
-#include "config.h"
+
+#include "common/common.h"
 #include "timer.h"
 
-#if HAVE_NANOSLEEP
-void mp_sleep_us(int64_t us)
+static clockid_t clk_id;
+
+void mp_sleep_ns(int64_t ns)
 {
-    if (us < 0)
+    if (ns < 0)
         return;
     struct timespec ts;
-    ts.tv_sec  =  us / 1000000;
-    ts.tv_nsec = (us % 1000000) * 1000;
+    ts.tv_sec  = ns / MP_TIME_S_TO_NS(1);
+    ts.tv_nsec = ns % MP_TIME_S_TO_NS(1);
     nanosleep(&ts, NULL);
 }
-#else
-void mp_sleep_us(int64_t us)
-{
-    if (us < 0)
-        return;
-    usleep(us);
-}
-#endif
 
-#if defined(_POSIX_TIMERS) && _POSIX_TIMERS > 0 && defined(CLOCK_MONOTONIC)
-uint64_t mp_raw_time_us(void)
+uint64_t mp_raw_time_ns(void)
 {
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts))
-        abort();
-    return ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+    struct timespec tp = {0};
+    clock_gettime(clk_id, &tp);
+    return MP_TIME_S_TO_NS(tp.tv_sec) + tp.tv_nsec;
 }
-#else
-uint64_t mp_raw_time_us(void)
-{
-    struct timeval tv;
-    gettimeofday(&tv,NULL);
-    return tv.tv_sec * 1000000LL + tv.tv_usec;
-}
-#endif
 
 void mp_raw_time_init(void)
 {
+    static const clockid_t clock_ids[] = {
+#ifdef CLOCK_MONOTONIC_RAW
+        CLOCK_MONOTONIC_RAW,
+#endif
+        CLOCK_MONOTONIC,
+    };
+
+    struct timespec tp;
+    for (int i = 0; i < MP_ARRAY_SIZE(clock_ids); ++i) {
+        clk_id = clock_ids[i];
+        if (!clock_gettime(clk_id, &tp))
+            return;
+    }
+    fputs("No clock source available!\n", stderr);
+    abort();
 }

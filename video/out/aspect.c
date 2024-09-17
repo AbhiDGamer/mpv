@@ -1,23 +1,23 @@
 /*
- * This file is part of MPlayer.
+ * This file is part of mpv.
  *
- * MPlayer is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  *
- * MPlayer is distributed in the hope that it will be useful,
+ * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License along
- * with MPlayer; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 /* Stuff for correct aspect scaling. */
 #include "aspect.h"
+#include "math.h"
 #include "vo.h"
 #include "common/msg.h"
 #include "options/options.h"
@@ -26,35 +26,40 @@
 #include "vo.h"
 #include "sub/osd.h"
 
-static void aspect_calc_panscan(struct mp_log *log, struct mp_vo_opts *opts,
-                                int w, int h, int d_w, int d_h,
+static void aspect_calc_panscan(struct mp_vo_opts *opts,
+                                int w, int h, int d_w, int d_h, int unscaled,
                                 int window_w, int window_h, double monitor_par,
                                 int *out_w, int *out_h)
 {
-    mp_dbg(log, "aspect(0) fitin: %dx%d monitor_par: %.2f\n",
-           window_w, window_h, monitor_par);
     int fwidth = window_w;
     int fheight = (float)window_w / d_w * d_h / monitor_par;
-    mp_dbg(log, "aspect(1) wh: %dx%d (org: %dx%d)\n",
-           fwidth, fheight, d_w, d_h);
     if (fheight > window_h || fheight < h) {
         int tmpw = (float)window_h / d_h * d_w * monitor_par;
         if (tmpw <= window_w) {
             fheight = window_h;
             fwidth = tmpw;
-        } else if (fheight > window_h) {
-            mp_warn(log, "No suitable new aspect found!\n");
         }
     }
-    mp_dbg(log, "aspect(2) wh: %dx%d (org: %dx%d)\n",
-           fwidth, fheight, d_w, d_h);
 
     int vo_panscan_area = window_h - fheight;
-    if (!vo_panscan_area)
+    double f_w = fwidth / (double)MPMAX(fheight, 1);
+    double f_h = 1;
+    if (vo_panscan_area == 0) {
         vo_panscan_area = window_w - fwidth;
+        f_w = 1;
+        f_h = fheight / (double)MPMAX(fwidth, 1);
+    }
 
-    *out_w = fwidth + vo_panscan_area * opts->panscan * fwidth / fheight;
-    *out_h = fheight + vo_panscan_area * opts->panscan;
+    if (unscaled) {
+        vo_panscan_area = 0;
+        if (unscaled != 2 || (d_w <= window_w && d_h <= window_h)) {
+            fwidth = d_w * monitor_par;
+            fheight = d_h;
+        }
+    }
+
+    *out_w = fwidth + vo_panscan_area * opts->panscan * f_w;
+    *out_h = fheight + vo_panscan_area * opts->panscan * f_h;
 }
 
 // Clamp [start, end) to range [0, size) with various fallbacks.
@@ -68,27 +73,17 @@ static void clamp_size(int size, int *start, int *end)
     }
 }
 
-// Round source to a multiple of 2, this is at least needed for vo_direct3d
-// and ATI cards.
-#define VID_SRC_ROUND_UP(x) (((x) + 1) & ~1)
-
 static void src_dst_split_scaling(int src_size, int dst_size,
-                                  int scaled_src_size, bool unscaled,
-                                  float zoom, float align, float pan,
+                                  int scaled_src_size,
+                                  float zoom, float align, float pan, float scale,
                                   int *src_start, int *src_end,
                                   int *dst_start, int *dst_end,
                                   int *osd_margin_a, int *osd_margin_b)
 {
-    if (unscaled) {
-        scaled_src_size = src_size;
-        zoom = 0.0;
-    }
-
-    scaled_src_size += zoom * scaled_src_size;
+    scaled_src_size *= powf(2, zoom) * scale;
+    scaled_src_size = MPMAX(scaled_src_size, 1);
     align = (align + 1) / 2;
 
-    *src_start = 0;
-    *src_end = src_size;
     *dst_start = (dst_size - scaled_src_size) * align + pan * scaled_src_size;
     *dst_end = *dst_start + scaled_src_size;
 
@@ -101,29 +96,30 @@ static void src_dst_split_scaling(int src_size, int dst_size,
     int s_dst = *dst_end - *dst_start;
     if (*dst_start < 0) {
         int border = -(*dst_start) * s_src / s_dst;
-        *src_start += VID_SRC_ROUND_UP(border);
+        *src_start += border;
         *dst_start = 0;
     }
     if (*dst_end > dst_size) {
         int border = (*dst_end - dst_size) * s_src / s_dst;
-        *src_end -= VID_SRC_ROUND_UP(border);
+        *src_end -= border;
         *dst_end = dst_size;
-    }
-
-    if (unscaled) {
-        // Force unscaled by reducing the range for src or dst
-        int src_s = *src_end - *src_start;
-        int dst_s = *dst_end - *dst_start;
-        if (src_s > dst_s) {
-            *src_end = *src_start + dst_s;
-        } else if (src_s < dst_s) {
-            *dst_end = *dst_start + src_s;
-        }
     }
 
     // For sanity: avoid bothering VOs with corner cases
     clamp_size(src_size, src_start, src_end);
     clamp_size(dst_size, dst_start, dst_end);
+}
+
+static void calc_margin(float opts[2], int out[2], int size)
+{
+    out[0] = MPCLAMP((int)(opts[0] * size), 0, size);
+    out[1] = MPCLAMP((int)(opts[1] * size), 0, size);
+
+    if (out[0] + out[1] >= size) {
+        // This case is not really supported. Show an error by 1 pixel.
+        out[0] = 0;
+        out[1] = MPMAX(0, size - 1);
+    }
 }
 
 void mp_get_src_dst_rects(struct mp_log *log, struct mp_vo_opts *opts,
@@ -135,35 +131,67 @@ void mp_get_src_dst_rects(struct mp_log *log, struct mp_vo_opts *opts,
 {
     int src_w = video->w;
     int src_h = video->h;
-    int src_dw = video->d_w;
-    int src_dh = video->d_h;
-    if (video->rotate % 180 == 90 && (vo_caps & VO_CAP_ROTATE90)) {
-        MPSWAP(int, src_w, src_h);
-        MPSWAP(int, src_dw, src_dh);
-    }
+    int src_dw, src_dh;
+
+    mp_image_params_get_dsize(video, &src_dw, &src_dh);
     window_w = MPMAX(1, window_w);
     window_h = MPMAX(1, window_h);
+
+    int margin_x[2] = {0};
+    int margin_y[2] = {0};
+    if (opts->keepaspect) {
+        calc_margin(opts->margin_x, margin_x, window_w);
+        calc_margin(opts->margin_y, margin_y, window_h);
+    }
+
+    int vid_window_w = window_w - margin_x[0] - margin_x[1];
+    int vid_window_h = window_h - margin_y[0] - margin_y[1];
+
     struct mp_rect dst = {0, 0, window_w, window_h};
     struct mp_rect src = {0, 0, src_w,    src_h};
+    if (mp_image_crop_valid(video))
+        src = video->crop;
+
+    if (vo_caps & VO_CAP_ROTATE90) {
+        if (video->rotate % 180 == 90) {
+            MPSWAP(int, src_w, src_h);
+            MPSWAP(int, src_dw, src_dh);
+        }
+        mp_rect_rotate(&src, src_w, src_h, video->rotate);
+    }
+
     struct mp_osd_res osd = {
         .w = window_w,
         .h = window_h,
         .display_par = monitor_par,
     };
+
     if (opts->keepaspect) {
         int scaled_width, scaled_height;
-        aspect_calc_panscan(log, opts, src_w, src_h, src_dw, src_dh,
-                            window_w, window_h, monitor_par,
+        aspect_calc_panscan(opts, src_w, src_h, src_dw, src_dh, opts->unscaled,
+                            vid_window_w, vid_window_h, monitor_par,
                             &scaled_width, &scaled_height);
-        src_dst_split_scaling(src_w, window_w, scaled_width, opts->unscaled,
-                              opts->zoom, opts->align_x, opts->pan_x,
+        src_dst_split_scaling(src_w, vid_window_w, scaled_width,
+                              opts->zoom, opts->align_x, opts->pan_x, opts->scale_x,
                               &src.x0, &src.x1, &dst.x0, &dst.x1,
                               &osd.ml, &osd.mr);
-        src_dst_split_scaling(src_h, window_h, scaled_height, opts->unscaled,
-                              opts->zoom, opts->align_y, opts->pan_y,
+        src_dst_split_scaling(src_h, vid_window_h, scaled_height,
+                              opts->zoom, opts->align_y, opts->pan_y, opts->scale_y,
                               &src.y0, &src.y1, &dst.y0, &dst.y1,
                               &osd.mt, &osd.mb);
     }
+
+    dst.x0 += margin_x[0];
+    dst.y0 += margin_y[0];
+    dst.x1 += margin_x[0];
+    dst.y1 += margin_y[0];
+
+    // OSD really uses the full window, but was computed on the margin-cut
+    // video sub-window. Correct it to the full window.
+    osd.ml += margin_x[0];
+    osd.mr += margin_x[1];
+    osd.mt += margin_y[0];
+    osd.mb += margin_y[1];
 
     *out_src = src;
     *out_dst = dst;
@@ -172,10 +200,11 @@ void mp_get_src_dst_rects(struct mp_log *log, struct mp_vo_opts *opts,
     int sw = src.x1 - src.x0, sh = src.y1 - src.y0;
     int dw = dst.x1 - dst.x0, dh = dst.y1 - dst.y0;
 
-    mp_verbose(log, "Window size: %dx%d\n",
-               window_w, window_h);
-    mp_verbose(log, "Video source: %dx%d (%dx%d)\n",
-               video->w, video->h, video->d_w, video->d_h);
+    mp_verbose(log, "Window size: %dx%d (Borders: l=%d t=%d r=%d b=%d)\n",
+               window_w, window_h,
+               margin_x[0], margin_y[0], margin_x[1], margin_y[1]);
+    mp_verbose(log, "Video source: %dx%d (%d:%d)\n",
+               video->w, video->h, video->p_w, video->p_h);
     mp_verbose(log, "Video display: (%d, %d) %dx%d -> (%d, %d) %dx%d\n",
                src.x0, src.y0, sw, sh, dst.x0, dst.y0, dw, dh);
     mp_verbose(log, "Video scale: %f/%f\n",

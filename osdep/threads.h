@@ -1,19 +1,23 @@
 #ifndef MP_OSDEP_THREADS_H_
 #define MP_OSDEP_THREADS_H_
 
-#include <pthread.h>
-#include <inttypes.h>
+#include "config.h"
 
-// Call pthread_cond_timedwait() with an absolute timeout using the same
-// time source/unit as mp_time_us() (microseconds).
-int mpthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
-                            int64_t abstime);
+enum mp_mutex_type {
+    MP_MUTEX_NORMAL = 0,
+    MP_MUTEX_RECURSIVE,
+};
 
-// Wait by a relative amount of time in seconds.
-int mpthread_cond_timedwait_rel(pthread_cond_t *cond, pthread_mutex_t *mutex,
-                                double seconds);
+#define mp_mutex_init(mutex) \
+    mp_mutex_init_type(mutex, MP_MUTEX_NORMAL)
 
-// Helper to reduce boiler plate.
-int mpthread_mutex_init_recursive(pthread_mutex_t *mutex);
+#define mp_mutex_init_type(mutex, mtype) \
+    mp_mutex_init_type_internal(mutex, mtype)
+
+#if HAVE_WIN32_THREADS
+#include "threads-win32.h"
+#else
+#include "threads-posix.h"
+#endif
 
 #endif

@@ -4,46 +4,60 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "player/core.h"
 #include "osd.h"
 
 struct sh_stream;
-struct ass_track;
 struct mpv_global;
 struct demux_packet;
-struct ass_library;
-struct ass_renderer;
-
+struct mp_recorder_sink;
 struct dec_sub;
 struct sd;
 
 enum sd_ctrl {
     SD_CTRL_SUB_STEP,
+    SD_CTRL_SET_ANIMATED_CHECK,
     SD_CTRL_SET_VIDEO_PARAMS,
-    SD_CTRL_GET_RESOLUTION,
+    SD_CTRL_SET_VIDEO_DEF_FPS,
+    SD_CTRL_UPDATE_OPTS,
 };
 
-struct dec_sub *sub_create(struct mpv_global *global);
+enum sd_text_type {
+    SD_TEXT_TYPE_PLAIN,
+    SD_TEXT_TYPE_ASS,
+    SD_TEXT_TYPE_ASS_FULL,
+};
+
+struct sd_times {
+    double start;
+    double end;
+};
+
+struct attachment_list {
+    struct demux_attachment *entries;
+    int num_entries;
+};
+
+struct dec_sub *sub_create(struct mpv_global *global, struct track *track,
+                           struct attachment_list *attachments, int order);
 void sub_destroy(struct dec_sub *sub);
-void sub_lock(struct dec_sub *sub);
-void sub_unlock(struct dec_sub *sub);
 
-void sub_set_video_res(struct dec_sub *sub, int w, int h);
-void sub_set_video_fps(struct dec_sub *sub, double fps);
-void sub_set_extradata(struct dec_sub *sub, void *data, int data_len);
-void sub_set_ass_renderer(struct dec_sub *sub, struct ass_library *ass_library,
-                          struct ass_renderer *ass_renderer);
-void sub_init_from_sh(struct dec_sub *sub, struct sh_stream *sh);
-
-bool sub_is_initialized(struct dec_sub *sub);
-
-bool sub_read_all_packets(struct dec_sub *sub, struct sh_stream *sh);
-bool sub_accept_packets_in_advance(struct dec_sub *sub);
-void sub_decode(struct dec_sub *sub, struct demux_packet *packet);
-void sub_get_bitmaps(struct dec_sub *sub, struct mp_osd_res dim, double pts,
-                     struct sub_bitmaps *res);
-bool sub_has_get_text(struct dec_sub *sub);
-char *sub_get_text(struct dec_sub *sub, double pts);
+bool sub_can_preload(struct dec_sub *sub);
+void sub_preload(struct dec_sub *sub);
+void sub_redecode_cached_packets(struct dec_sub *sub);
+void sub_read_packets(struct dec_sub *sub, double video_pts, bool force,
+                      bool *packets_read, bool *sub_updated);
+struct sub_bitmaps *sub_get_bitmaps(struct dec_sub *sub, struct mp_osd_res dim,
+                                    int format, double pts);
+char *sub_get_text(struct dec_sub *sub, double pts, enum sd_text_type type);
+char *sub_ass_get_extradata(struct dec_sub *sub);
+struct sd_times sub_get_times(struct dec_sub *sub, double pts);
 void sub_reset(struct dec_sub *sub);
+void sub_select(struct dec_sub *sub, bool selected);
+void sub_set_recorder_sink(struct dec_sub *sub, struct mp_recorder_sink *sink);
+void sub_set_play_dir(struct dec_sub *sub, int dir);
+bool sub_is_primary_visible(struct dec_sub *sub);
+bool sub_is_secondary_visible(struct dec_sub *sub);
 
 int sub_control(struct dec_sub *sub, enum sd_ctrl cmd, void *arg);
 

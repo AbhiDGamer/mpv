@@ -1,4 +1,6 @@
-/* Permission to use, copy, modify, and/or distribute this software for any
+/* Copyright (C) 2017 the mpv developers
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
  *
@@ -15,6 +17,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
+#include "osdep/strnlen.h"
 
 #define TA_NO_WRAPPERS
 #include "ta.h"
@@ -41,32 +44,19 @@ size_t ta_calc_prealloc_elems(size_t nextidx)
     return (nextidx + 1) * 2;
 }
 
-static void dummy_dtor(void *p){}
-
-/* Create an empty (size 0) TA allocation, which is prepared in a way such that
- * using it as parent with ta_set_parent() always succeed. Calling
- * ta_set_destructor() on it will always succeed as well.
+/* Create an empty (size 0) TA allocation.
  */
 void *ta_new_context(void *ta_parent)
 {
-    void *new = ta_alloc_size(ta_parent, 0);
-    // Force it to allocate an extended header.
-    if (!ta_set_destructor(new, dummy_dtor)) {
-        ta_free(new);
-        new = NULL;
-    }
-    return new;
+    return ta_alloc_size(ta_parent, 0);
 }
 
 /* Set parent of ptr to ta_parent, return the ptr.
  * Note that ta_parent==NULL will simply unset the current parent of ptr.
- * If the operation fails (on OOM), return NULL. (That's pretty bad behavior,
- * but the only way to signal failure.)
  */
 void *ta_steal_(void *ta_parent, void *ptr)
 {
-    if (!ta_set_parent(ptr, ta_parent))
-        return NULL;
+    ta_set_parent(ptr, ta_parent);
     return ptr;
 }
 
@@ -106,7 +96,9 @@ static bool strndup_append_at(char **str, size_t at, const char *append,
         *str = t;
     }
 
-    memcpy(*str + at, append, append_len);
+    if (append_len)
+        memcpy(*str + at, append, append_len);
+
     (*str)[at + append_len] = '\0';
 
     ta_dbg_mark_as_string(*str);
@@ -133,10 +125,7 @@ char *ta_strndup(void *ta_parent, const char *str, size_t n)
         return NULL;
     char *new = NULL;
     strndup_append_at(&new, 0, str, n);
-    if (!ta_set_parent(new, ta_parent)) {
-        ta_free(new);
-        new = NULL;
-    }
+    ta_set_parent(new, ta_parent);
     return new;
 }
 
@@ -179,6 +168,7 @@ bool ta_strndup_append_buffer(char **str, const char *a, size_t n)
     return strndup_append_at(str, size, a, n);
 }
 
+TA_PRF(3, 0)
 static bool ta_vasprintf_append_at(char **str, size_t at, const char *fmt,
                                    va_list ap)
 {
@@ -224,7 +214,8 @@ char *ta_vasprintf(void *ta_parent, const char *fmt, va_list ap)
 {
     char *res = NULL;
     ta_vasprintf_append_at(&res, 0, fmt, ap);
-    if (!res || !ta_set_parent(res, ta_parent)) {
+    ta_set_parent(res, ta_parent);
+    if (!res) {
         ta_free(res);
         return NULL;
     }
@@ -247,7 +238,7 @@ bool ta_asprintf_append(char **str, const char *fmt, ...)
 
 bool ta_vasprintf_append(char **str, const char *fmt, va_list ap)
 {
-    return ta_vasprintf_append_at(str, str && *str ? strlen(*str) : 0, fmt, ap);
+    return ta_vasprintf_append_at(str, *str ? strlen(*str) : 0, fmt, ap);
 }
 
 /* Append the formatted string at the end of the allocation of *str. It
@@ -273,33 +264,6 @@ bool ta_vasprintf_append_buffer(char **str, const char *fmt, va_list ap)
     if (size > 0)
         size -= 1;
     return ta_vasprintf_append_at(str, size, fmt, ap);
-}
-
-
-void *ta_oom_p(void *p)
-{
-    if (!p)
-        abort();
-    return p;
-}
-
-void ta_oom_b(bool b)
-{
-    if (!b)
-        abort();
-}
-
-char *ta_oom_s(char *s)
-{
-    if (!s)
-        abort();
-    return s;
-}
-
-void *ta_xsteal_(void *ta_parent, void *ptr)
-{
-    ta_oom_b(ta_set_parent(ptr, ta_parent));
-    return ptr;
 }
 
 void *ta_xmemdup(void *ta_parent, void *ptr, size_t size)

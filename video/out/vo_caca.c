@@ -7,21 +7,20 @@
  *
  * TODO: support draw_alpha?
  *
- * This file is part of MPlayer.
+ * This file is part of mpv.
  *
- * MPlayer is free software; you can redistribute it and/or modify
+ * mpv is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
  *
- * MPlayer is distributed in the hope that it will be useful,
+ * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License along
- * with MPlayer; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdio.h>
@@ -37,13 +36,16 @@
 #include "config.h"
 #include "vo.h"
 #include "video/mp_image.h"
-#include "video/vfcap.h"
-#include "video/memcpy_pic.h"
 
 #include "input/keycodes.h"
 #include "input/input.h"
 #include "common/msg.h"
 #include "input/input.h"
+
+#include "config.h"
+#if !HAVE_GPL
+#error GPL only
+#endif
 
 struct priv {
     caca_canvas_t  *canvas;
@@ -99,7 +101,7 @@ static int resize(struct vo *vo)
     return 0;
 }
 
-static int reconfig(struct vo *vo, struct mp_image_params *params, int flags)
+static int reconfig(struct vo *vo, struct mp_image_params *params)
 {
     struct priv *priv = vo->priv;
     priv->image_height = params->h;
@@ -109,13 +111,15 @@ static int reconfig(struct vo *vo, struct mp_image_params *params, int flags)
     return resize(vo);
 }
 
-static void draw_image(struct vo *vo, mp_image_t *mpi)
+static void draw_frame(struct vo *vo, struct vo_frame *frame)
 {
     struct priv *priv = vo->priv;
+    struct mp_image *mpi = frame->current;
+    if (!mpi)
+        return;
     memcpy_pic(priv->dither_buffer, mpi->planes[0], priv->image_width * depth, priv->image_height,
                priv->image_width * depth, mpi->stride[0]);
     caca_dither_bitmap(priv->canvas, 0, 0, priv->screen_w, priv->screen_h, priv->dither, priv->dither_buffer);
-    talloc_free(mpi);
 }
 
 static void flip_page(struct vo *vo)
@@ -182,11 +186,11 @@ static void check_events(struct vo *vo)
             break;
         case CACA_EVENT_MOUSE_PRESS:
             mp_input_put_key(vo->input_ctx,
-                    (MP_MOUSE_BTN0 + cev.data.mouse.button - 1) | MP_KEY_STATE_DOWN);
+                    (MP_MBTN_BASE + cev.data.mouse.button - 1) | MP_KEY_STATE_DOWN);
             break;
         case CACA_EVENT_MOUSE_RELEASE:
             mp_input_put_key(vo->input_ctx,
-                    (MP_MOUSE_BTN0 + cev.data.mouse.button - 1) | MP_KEY_STATE_UP);
+                    (MP_MBTN_BASE + cev.data.mouse.button - 1) | MP_KEY_STATE_UP);
             break;
         case CACA_EVENT_KEY_PRESS:
         {
@@ -274,24 +278,23 @@ static int preinit(struct vo *vo)
         return ENOSYS;
     }
 
-    caca_set_display_title(priv->display, "mpv");
-
     return 0;
 }
 
-static int query_format(struct vo *vo, uint32_t format)
+static int query_format(struct vo *vo, int format)
 {
-    if (format == IMGFMT_BGR24)
-        return VFCAP_CSP_SUPPORTED;
-
-    return 0;
+    return format == IMGFMT_BGR24;
 }
 
 static int control(struct vo *vo, uint32_t request, void *data)
 {
+    struct priv *priv = vo->priv;
     switch (request) {
     case VOCTRL_CHECK_EVENTS:
         check_events(vo);
+        return VO_TRUE;
+    case VOCTRL_UPDATE_WINDOW_TITLE:
+        caca_set_display_title(priv->display, (char *)data);
         return VO_TRUE;
     }
     return VO_NOTIMPL;
@@ -304,7 +307,7 @@ const struct vo_driver video_out_caca = {
     .query_format = query_format,
     .reconfig = reconfig,
     .control = control,
-    .draw_image = draw_image,
+    .draw_frame = draw_frame,
     .flip_page = flip_page,
     .uninit = uninit,
     .priv_size = sizeof(struct priv),

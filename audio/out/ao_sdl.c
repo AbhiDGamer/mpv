@@ -4,24 +4,22 @@
  *
  * This file is part of mpv.
  *
- * MPlayer is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  *
- * MPlayer is distributed in the hope that it will be useful,
+ * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License along
- * with MPlayer; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "config.h"
 #include "audio/format.h"
-#include "talloc.h"
+#include "mpv_talloc.h"
 #include "ao.h"
 #include "internal.h"
 #include "common/common.h"
@@ -38,6 +36,18 @@ struct priv
     float buflen;
 };
 
+static const int fmtmap[][2] = {
+    {AF_FORMAT_U8,      AUDIO_U8},
+    {AF_FORMAT_S16,     AUDIO_S16SYS},
+#ifdef AUDIO_S32SYS
+    {AF_FORMAT_S32,     AUDIO_S32SYS},
+#endif
+#ifdef AUDIO_F32SYS
+    {AF_FORMAT_FLOAT,   AUDIO_F32SYS},
+#endif
+    {0}
+};
+
 static void audio_callback(void *userdata, Uint8 *stream, int len)
 {
     struct ao *ao = userdata;
@@ -51,7 +61,7 @@ static void audio_callback(void *userdata, Uint8 *stream, int len)
     // fixed latency.
     double delay = 2 * len / (double)ao->bps;
 
-    ao_read_data(ao, data, len / ao->sstride, mp_time_us() + 1000000LL * delay);
+    ao_read_data(ao, data, len / ao->sstride, mp_time_ns() + MP_TIME_S_TO_NS(delay), NULL, true, true);
 }
 
 static void uninit(struct ao *ao)
@@ -102,33 +112,20 @@ static int init(struct ao *ao)
 
     ao->format = af_fmt_from_planar(ao->format);
 
-    SDL_AudioSpec desired, obtained;
-
-    switch (ao->format) {
-        case AF_FORMAT_U8: desired.format = AUDIO_U8; break;
-        case AF_FORMAT_S8: desired.format = AUDIO_S8; break;
-        case AF_FORMAT_U16_LE: desired.format = AUDIO_U16LSB; break;
-        case AF_FORMAT_U16_BE: desired.format = AUDIO_U16MSB; break;
-        default:
-        case AF_FORMAT_S16_LE: desired.format = AUDIO_S16LSB; break;
-        case AF_FORMAT_S16_BE: desired.format = AUDIO_S16MSB; break;
-#ifdef AUDIO_S32LSB
-        case AF_FORMAT_S32_LE: desired.format = AUDIO_S32LSB; break;
-#endif
-#ifdef AUDIO_S32MSB
-        case AF_FORMAT_S32_BE: desired.format = AUDIO_S32MSB; break;
-#endif
-#ifdef AUDIO_F32LSB
-        case AF_FORMAT_FLOAT_LE: desired.format = AUDIO_F32LSB; break;
-#endif
-#ifdef AUDIO_F32MSB
-        case AF_FORMAT_FLOAT_BE: desired.format = AUDIO_F32MSB; break;
-#endif
+    SDL_AudioSpec desired = {0};
+    desired.format = AUDIO_S16SYS;
+    for (int n = 0; fmtmap[n][0]; n++) {
+        if (ao->format == fmtmap[n][0]) {
+            desired.format = fmtmap[n][1];
+            break;
+        }
     }
     desired.freq = ao->samplerate;
     desired.channels = ao->channels.num;
-    desired.samples = MPMIN(32768, ceil_power_of_two(ao->samplerate *
-                                                     priv->buflen));
+    if (priv->buflen) {
+        desired.samples = MPMIN(32768, ceil_power_of_two(ao->samplerate *
+                                                         priv->buflen));
+    }
     desired.callback = audio_callback;
     desired.userdata = ao;
 
@@ -137,7 +134,7 @@ static int init(struct ao *ao)
                (int) desired.freq, (int) desired.channels,
                (int) desired.format, (int) desired.samples);
 
-    obtained = desired;
+    SDL_AudioSpec obtained = desired;
     if (SDL_OpenAudio(&desired, &obtained)) {
         if (!ao->probing)
             MP_ERR(ao, "could not open audio: %s\n", SDL_GetError());
@@ -156,30 +153,18 @@ static int init(struct ao *ao)
     // large, this will help.
     ao->device_buffer = 3 * obtained.samples;
 
-    switch (obtained.format) {
-        case AUDIO_U8: ao->format = AF_FORMAT_U8; break;
-        case AUDIO_S8: ao->format = AF_FORMAT_S8; break;
-        case AUDIO_S16LSB: ao->format = AF_FORMAT_S16_LE; break;
-        case AUDIO_S16MSB: ao->format = AF_FORMAT_S16_BE; break;
-        case AUDIO_U16LSB: ao->format = AF_FORMAT_U16_LE; break;
-        case AUDIO_U16MSB: ao->format = AF_FORMAT_U16_BE; break;
-#ifdef AUDIO_S32LSB
-        case AUDIO_S32LSB: ao->format = AF_FORMAT_S32_LE; break;
-#endif
-#ifdef AUDIO_S32MSB
-        case AUDIO_S32MSB: ao->format = AF_FORMAT_S32_BE; break;
-#endif
-#ifdef AUDIO_F32LSB
-        case AUDIO_F32LSB: ao->format = AF_FORMAT_FLOAT_LE; break;
-#endif
-#ifdef AUDIO_F32MSB
-        case AUDIO_F32MSB: ao->format = AF_FORMAT_FLOAT_BE; break;
-#endif
-        default:
-            if (!ao->probing)
-                MP_ERR(ao, "could not find matching format\n");
-            uninit(ao);
-            return -1;
+    ao->format = 0;
+    for (int n = 0; fmtmap[n][0]; n++) {
+        if (obtained.format == fmtmap[n][1]) {
+            ao->format = fmtmap[n][0];
+            break;
+        }
+    }
+    if (!ao->format) {
+        if (!ao->probing)
+            MP_ERR(ao, "could not find matching format\n");
+        uninit(ao);
+        return -1;
     }
 
     if (!ao_chmap_sel_get_def(ao, &sel, &ao->channels, obtained.channels)) {
@@ -202,7 +187,7 @@ static void reset(struct ao *ao)
     priv->paused = 1;
 }
 
-static void resume(struct ao *ao)
+static void start(struct ao *ao)
 {
     struct priv *priv = ao->priv;
     if (priv->paused)
@@ -218,13 +203,14 @@ const struct ao_driver audio_out_sdl = {
     .init      = init,
     .uninit    = uninit,
     .reset     = reset,
-    .resume    = resume,
+    .start     = start,
     .priv_size = sizeof(struct priv),
     .priv_defaults = &(const struct priv) {
         .buflen = 0, // use SDL default
     },
     .options = (const struct m_option[]) {
-        OPT_FLOAT("buflen", buflen, 0),
+        {"buflen", OPT_FLOAT(buflen)},
         {0}
     },
+    .options_prefix = "sdl",
 };

@@ -1,12 +1,16 @@
 -- Rebuild the terminal status line as a lua script
 -- Be aware that this will require more cpu power!
+-- Also, this is based on a rather old version of the
+-- builtin mpv status line.
+
+local newStatus
 
 -- Add a string to the status line
-function atsl(s)
+local function atsl(s)
     newStatus = newStatus .. s
 end
 
-function update_status_line()
+local function update_status_line()
     -- Reset the status line
     newStatus = ""
 
@@ -16,10 +20,10 @@ function update_status_line()
         atsl("(Buffering) ")
     end
 
-    if mp.get_property("vid") ~= "no" then
+    if mp.get_property("aid") ~= "no" then
         atsl("A")
     end
-    if mp.get_property("aid") ~= "no" then
+    if mp.get_property("vid") ~= "no" then
         atsl("V")
     end
 
@@ -28,7 +32,7 @@ function update_status_line()
     atsl(mp.get_property_osd("time-pos"))
 
     atsl(" / ");
-    atsl(mp.get_property_osd("length"));
+    atsl(mp.get_property_osd("duration"));
 
     atsl(" (")
     atsl(mp.get_property_osd("percent-pos", -1))
@@ -39,9 +43,9 @@ function update_status_line()
         atsl(string.format(" x%4.2f", r))
     end
 
-    r = mp.get_property_number("avsync", nil)
+    r = mp.get_property_number("avsync")
     if r ~= nil then
-        atsl(string.format(" A-V: %7.3f", r))
+        atsl(string.format(" A-V: %f", r))
     end
 
     r = mp.get_property("total-avsync-change", 0)
@@ -49,9 +53,21 @@ function update_status_line()
         atsl(string.format(" ct:%7.3f", r))
     end
 
-    r = mp.get_property_number("drop-frame-count", -1)
+    r = mp.get_property_number("decoder-drop-frame-count", -1)
     if r > 0 then
         atsl(" Late: ")
+        atsl(r)
+    end
+
+    r = mp.get_property_osd("video-bitrate")
+    if r ~= nil and r ~= "" then
+        atsl(" Vb: ")
+        atsl(r)
+    end
+
+    r = mp.get_property_osd("audio-bitrate")
+    if r ~= nil and r ~= "" then
+        atsl(" Ab: ")
         atsl(r)
     end
 
@@ -64,6 +80,15 @@ function update_status_line()
     mp.set_property("options/term-status-msg", newStatus)
 end
 
--- Register the event
-mp.register_event("tick", update_status_line)
+local timer = mp.add_periodic_timer(1, update_status_line)
 
+local function on_pause_change(_, value)
+    if value == false then
+        timer:resume()
+    else
+        timer:stop()
+    end
+    mp.add_timeout(0.1, update_status_line)
+end
+mp.observe_property("pause", "bool", on_pause_change)
+mp.register_event("seek", update_status_line)

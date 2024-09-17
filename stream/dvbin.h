@@ -11,102 +11,133 @@
 #include "config.h"
 #include "stream.h"
 
-#define SLOF (11700*1000UL)
-#define LOF1 (9750*1000UL)
-#define LOF2 (10600*1000UL)
+#if !HAVE_GPL
+#error GPL only
+#endif
+
+#define SLOF (11700 * 1000UL)
+#define LOF1 (9750 * 1000UL)
+#define LOF2 (10600 * 1000UL)
 
 #include <inttypes.h>
 #include <linux/dvb/dmx.h>
 #include <linux/dvb/frontend.h>
 #include <linux/dvb/version.h>
 
-#undef DVB_ATSC
-#if defined(DVB_API_VERSION_MINOR)
+#define MAX_ADAPTERS 16
+#define MAX_FRONTENDS 8
 
-/* kernel headers >=2.6.28 have version 5.
- *
- * FIXME: are there any real differences between 3.1 and 5?
- */
-
-#if (DVB_API_VERSION == 3 && DVB_API_VERSION_MINOR >= 1) || DVB_API_VERSION == 5
-#define DVB_ATSC 1
+#if DVB_API_VERSION < 5 || DVB_API_VERSION_MINOR < 8
+#error DVB support requires a non-ancient kernel
 #endif
-
-#endif
-
 
 #define DVB_CHANNEL_LOWER -1
 #define DVB_CHANNEL_HIGHER 1
 
 #ifndef DMX_FILTER_SIZE
-#define DMX_FILTER_SIZE 16
+#define DMX_FILTER_SIZE 32
 #endif
 
 typedef struct {
-        char                            *name;
-        int                             freq, srate, diseqc, tone;
-        char                            pol;
-        int                             tpid, dpid1, dpid2, progid, ca, pids[DMX_FILTER_SIZE], pids_cnt;
-        fe_spectral_inversion_t         inv;
-        fe_modulation_t                 mod;
-        fe_transmit_mode_t              trans;
-        fe_bandwidth_t                  bw;
-        fe_guard_interval_t             gi;
-        fe_code_rate_t                  cr, cr_lp;
-        fe_hierarchy_t                  hier;
+    char *name;
+    unsigned int freq, srate, diseqc;
+    char pol;
+    unsigned int tpid, dpid1, dpid2, progid, ca, pids[DMX_FILTER_SIZE], pids_cnt;
+    bool is_dvb_x2; /* Used only in dvb_get_channels() and parse_vdr_par_string(), use delsys. */
+    unsigned int frontend;
+    unsigned int delsys;
+    unsigned int stream_id;
+    unsigned int service_id;
+    fe_spectral_inversion_t inv;
+    fe_modulation_t mod;
+    fe_transmit_mode_t trans;
+    fe_bandwidth_t bw;
+    fe_guard_interval_t gi;
+    fe_code_rate_t cr, cr_lp;
+    fe_hierarchy_t hier;
 } dvb_channel_t;
 
 typedef struct {
-        uint16_t NUM_CHANNELS;
-        uint16_t current;
-        dvb_channel_t *channels;
-} dvb_channels_list;
+    unsigned int NUM_CHANNELS;
+    unsigned int current;
+    dvb_channel_t *channels;
+} dvb_channels_list_t;
 
 typedef struct {
-        int type;
-        dvb_channels_list *list;
-        char *name;
-        int devno;
-} dvb_card_config_t;
+    int devno;
+    unsigned int delsys_mask[MAX_FRONTENDS];
+    dvb_channels_list_t *list;
+} dvb_adapter_config_t;
 
 typedef struct {
-        int count;
-        dvb_card_config_t *cards;
-        void *priv;
-} dvb_config_t;
+    unsigned int adapters_count;
+    dvb_adapter_config_t *adapters;
+    unsigned int cur_adapter;
+    unsigned int cur_frontend;
 
-typedef struct dvb_params {
-        struct mp_log *log;
-        int fd;
-        int card;
-        int fe_fd;
-        int sec_fd;
-        int demux_fd[3], demux_fds[DMX_FILTER_SIZE], demux_fds_cnt;
-        int dvr_fd;
+    int fe_fd;
+    int dvr_fd;
+    int demux_fd[3], demux_fds[DMX_FILTER_SIZE], demux_fds_cnt;
 
-        dvb_config_t *config;
-        dvb_channels_list *list;
-        int tuner_type;
-        int is_on;
-        int retry;
-        int timeout;
-        int last_freq;
+    bool is_on;
+    int retry;
+    unsigned int last_freq;
+    bool switching_channel;
+    bool stream_used;
+} dvb_state_t;
 
-        char *cfg_prog;
-        int cfg_card;
-        int cfg_timeout;
-        char *cfg_file;
+typedef struct {
+    char *cfg_prog;
+    int cfg_devno;
+    int cfg_timeout;
+    char *cfg_file;
+    bool cfg_full_transponder;
+    int cfg_channel_switch_offset;
+} dvb_opts_t;
+
+typedef struct {
+    struct mp_log *log;
+
+    dvb_state_t *state;
+
+    char *prog;
+    int devno;
+
+    int opts_check_time;
+    dvb_opts_t *opts;
+    struct m_config_cache *opts_cache;
 } dvb_priv_t;
 
 
-#define TUNER_SAT       1
-#define TUNER_TER       2
-#define TUNER_CBL       3
-#define TUNER_ATSC      4
+/* Keep in sync with enum fe_delivery_system. */
+#define SYS_DVB__COUNT__            (SYS_DVBC_ANNEX_C + 1)
 
-int dvb_step_channel(stream_t *, int);
-int dvb_set_channel(stream_t *, int, int);
-dvb_config_t *dvb_get_config(stream_t *);
-void dvb_free_config(dvb_config_t *config);
+
+#define DELSYS_BIT(__bit)        (((unsigned int)1) << (__bit))
+
+#define DELSYS_SET(__mask, __bit)                                       \
+    (__mask) |= DELSYS_BIT((__bit))
+
+#define DELSYS_IS_SET(__mask, __bit)                                    \
+    (0 != ((__mask) & DELSYS_BIT((__bit))))
+
+
+#define DELSYS_SUPP_MASK                                                \
+    (                                                                   \
+        DELSYS_BIT(SYS_DVBC_ANNEX_A) |                                  \
+        DELSYS_BIT(SYS_DVBT) |                                          \
+        DELSYS_BIT(SYS_DVBS) |                                          \
+        DELSYS_BIT(SYS_DVBS2) |                                         \
+        DELSYS_BIT(SYS_ATSC) |                                          \
+        DELSYS_BIT(SYS_DVBC_ANNEX_B) |                                  \
+        DELSYS_BIT(SYS_DVBT2) |                                         \
+        DELSYS_BIT(SYS_ISDBT) |                                         \
+        DELSYS_BIT(SYS_DVBC_ANNEX_C)                                    \
+    )
+
+void dvb_update_config(stream_t *);
+int dvb_parse_path(stream_t *);
+int dvb_set_channel(stream_t *, unsigned int, unsigned int);
+dvb_state_t *dvb_get_state(stream_t *);
 
 #endif /* MPLAYER_DVBIN_H */

@@ -1,66 +1,249 @@
 /*
- * This file is part of MPlayer.
+ * This file is part of mpv.
  *
- * MPlayer is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  *
- * MPlayer is distributed in the hope that it will be useful,
+ * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License along
- * with MPlayer; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <math.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <strings.h>
-#include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 #include "osdep/io.h"
 
-#include "talloc.h"
+#include "mpv_talloc.h"
 #include "common/msg.h"
 #include "options/options.h"
+#include "options/m_config.h"
+#include "options/path.h"
+#include "misc/ctype.h"
 
 #include "stream/stream.h"
 #include "demux.h"
 #include "stheader.h"
-#include "mf.h"
+#include "codec_tags.h"
 
 #define MF_MAX_FILE_SIZE (1024 * 1024 * 256)
 
-static void demux_seek_mf(demuxer_t *demuxer, double rel_seek_secs, int flags)
-{
-    mf_t *mf = demuxer->priv;
-    int newpos = (flags & SEEK_ABSOLUTE) ? 0 : mf->curr_frame - 1;
+typedef struct mf {
+    struct mp_log *log;
+    struct sh_stream *sh;
+    int curr_frame;
+    int nr_of_files;
+    char **names;
+    // optional
+    struct stream **streams;
+} mf_t;
 
-    if (flags & SEEK_FACTOR)
-        newpos += rel_seek_secs * (mf->nr_of_files - 1);
-    else
-        newpos += rel_seek_secs * mf->sh->fps;
-    if (newpos < 0)
-        newpos = 0;
-    if (newpos >= mf->nr_of_files)
-        newpos = mf->nr_of_files;
-    mf->curr_frame = newpos;
+
+static void mf_add(mf_t *mf, const char *fname)
+{
+    char *entry = talloc_strdup(mf, fname);
+    MP_TARRAY_APPEND(mf, mf->names, mf->nr_of_files, entry);
 }
 
-// return value:
-//     0 = EOF or no stream found
-//     1 = successfully read a packet
-static int demux_mf_fill_buffer(demuxer_t *demuxer)
+static mf_t *open_mf_pattern(void *talloc_ctx, struct demuxer *d, char *filename)
+{
+    struct mp_log *log = d->log;
+    int error_count = 0;
+    int count = 0;
+
+    mf_t *mf = talloc_zero(talloc_ctx, mf_t);
+    mf->log = log;
+
+    if (filename[0] == '@') {
+        struct stream *s = stream_create(filename + 1,
+                            d->stream_origin | STREAM_READ, d->cancel, d->global);
+        if (s && !s->is_directory) {
+            while (1) {
+                char buf[512];
+                int len = stream_read_peek(s, buf, sizeof(buf));
+                if (!len)
+                    break;
+                bstr data = (bstr){buf, len};
+                int pos = bstrchr(data, '\n');
+                data = bstr_splice(data, 0, pos < 0 ? data.len : pos + 1);
+                bstr fname = bstr_strip(data);
+                if (fname.len) {
+                    if (bstrchr(fname, '\0') >= 0) {
+                        mp_err(log, "invalid filename\n");
+                        break;
+                    }
+                    char *entry = bstrto0(mf, fname);
+                    if (!mp_path_exists(entry) && !mp_is_url(fname)) {
+                        mp_verbose(log, "file not found: '%s'\n", entry);
+                    } else {
+                        MP_TARRAY_APPEND(mf, mf->names, mf->nr_of_files, entry);
+                    }
+                }
+                stream_seek_skip(s, stream_tell(s) + data.len);
+            }
+            free_stream(s);
+
+            goto exit_mf;
+        }
+        free_stream(s);
+        mp_info(log, "%s is not indirect filelist\n", filename + 1);
+    }
+
+    if (strchr(filename, ',')) {
+        mp_info(log, "filelist: %s\n", filename);
+        bstr bfilename = bstr0(filename);
+
+        while (bfilename.len) {
+            bstr bfname;
+            bstr_split_tok(bfilename, ",", &bfname, &bfilename);
+            char *fname2 = bstrdup0(mf, bfname);
+
+            if (!mp_path_exists(fname2) && !mp_is_url(bfname))
+                mp_verbose(log, "file not found: '%s'\n", fname2);
+            else {
+                mf_add(mf, fname2);
+            }
+            talloc_free(fname2);
+        }
+
+        goto exit_mf;
+    }
+
+    bstr bfilename = bstr0(filename);
+    if (mp_is_url(bfilename))
+        goto exit_mf;
+
+    size_t fname_avail = bfilename.len + 32;
+    char *fname = talloc_size(mf, fname_avail);
+
+#if HAVE_GLOB && !defined(FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION)
+    if (!strchr(filename, '%')) {
+        // append * if none present
+        snprintf(fname, fname_avail, "%s%c", filename,
+            strchr(filename, '*') ? 0 : '*');
+        mp_info(log, "search expr: %s\n", fname);
+
+        glob_t gg;
+        if (glob(fname, 0, NULL, &gg)) {
+            talloc_free(mf);
+            return NULL;
+        }
+
+        for (int i = 0; i < gg.gl_pathc; i++) {
+            if (mp_path_isdir(gg.gl_pathv[i]))
+                continue;
+            mf_add(mf, gg.gl_pathv[i]);
+        }
+        globfree(&gg);
+        goto exit_mf;
+    }
+#endif
+
+    // We're using arbitrary user input as printf format with 1 int argument.
+    // Any format which uses exactly 1 int argument would be valid, but for
+    // simplicity we reject all conversion specifiers except %% and simple
+    // integer specifier: %[.][NUM]d where NUM is 1-3 digits (%.d is valid)
+    const char *f = filename;
+    int MAXDIGS = 3, nspec = 0, c;
+    bool bad_spec = false;
+
+    while (nspec < 2 && (c = *f++)) {
+        if (c != '%')
+            continue;
+
+        if (*f == '%') {
+            // '%%', which ends up as an explicit % in the output.
+            // Skipping forwards as it doesn't require further attention.
+            f++;
+            continue;
+        }
+
+        // Now c == '%' and *f != '%', thus we have entered territory of format
+        // specifiers which we are interested in.
+        nspec++;
+
+        if (*f == '.')
+            f++;
+
+        for (int ndig = 0; mp_isdigit(*f) && ndig < MAXDIGS; ndig++, f++)
+            /* no-op */;
+
+        if (*f != 'd') {
+            bad_spec = true; // not int, or beyond our validation capacity
+            break;
+        }
+
+        // *f is 'd'
+        f++;
+    }
+
+    // nspec==0 (zero specifiers) is rejected because fname wouldn't advance.
+    if (bad_spec || nspec != 1) {
+        mp_err(log,
+               "unsupported expr format: '%s' - exactly one format specifier of the form %%[.][NUM]d is expected\n",
+               filename);
+        goto exit_mf;
+    }
+
+    mp_info(log, "search expr: %s\n", filename);
+
+    while (error_count < 5) {
+        if (snprintf(fname, fname_avail, filename, count++) >= fname_avail) {
+            mp_err(log, "format result too long: '%s'\n", filename);
+            goto exit_mf;
+        }
+        if (!mp_path_exists(fname)) {
+            error_count++;
+            mp_verbose(log, "file not found: '%s'\n", fname);
+        } else {
+            mf_add(mf, fname);
+        }
+    }
+
+exit_mf:
+    mp_info(log, "number of files: %d\n", mf->nr_of_files);
+    return mf;
+}
+
+static mf_t *open_mf_single(void *talloc_ctx, struct mp_log *log, char *filename)
+{
+    mf_t *mf = talloc_zero(talloc_ctx, mf_t);
+    mf->log = log;
+    mf_add(mf, filename);
+    return mf;
+}
+
+static void demux_seek_mf(demuxer_t *demuxer, double seek_pts, int flags)
+{
+    mf_t *mf = demuxer->priv;
+    double newpos = seek_pts * mf->sh->codec->fps;
+    if (flags & SEEK_FACTOR)
+        newpos = seek_pts * (mf->nr_of_files - 1);
+    if (flags & SEEK_FORWARD) {
+        newpos = ceil(newpos);
+    } else {
+        newpos = MPMIN(floor(newpos), mf->nr_of_files - 1);
+    }
+    mf->curr_frame = MPCLAMP((int)newpos, 0, mf->nr_of_files);
+}
+
+static bool demux_mf_read_packet(struct demuxer *demuxer,
+                                 struct demux_packet **pkt)
 {
     mf_t *mf = demuxer->priv;
     if (mf->curr_frame >= mf->nr_of_files)
-        return 0;
+        return false;
+    bool ok = false;
 
     struct stream *entry_stream = NULL;
     if (mf->streams)
@@ -68,8 +251,10 @@ static int demux_mf_fill_buffer(demuxer_t *demuxer)
     struct stream *stream = entry_stream;
     if (!stream) {
         char *filename = mf->names[mf->curr_frame];
-        if (filename)
-            stream = stream_open(filename, demuxer->global);
+        if (filename) {
+            stream = stream_create(filename, demuxer->stream_origin | STREAM_READ,
+                                   demuxer->cancel, demuxer->global);
+        }
     }
 
     if (stream) {
@@ -77,10 +262,14 @@ static int demux_mf_fill_buffer(demuxer_t *demuxer)
         bstr data = stream_read_complete(stream, NULL, MF_MAX_FILE_SIZE);
         if (data.len) {
             demux_packet_t *dp = new_demux_packet(data.len);
-            memcpy(dp->buffer, data.start, data.len);
-            dp->pts = mf->curr_frame / mf->sh->fps;
-            dp->keyframe = true;
-            demux_add_packet(demuxer->streams[0], dp);
+            if (dp) {
+                memcpy(dp->buffer, data.start, data.len);
+                dp->pts = mf->curr_frame / mf->sh->codec->fps;
+                dp->keyframe = true;
+                dp->stream = mf->sh->index;
+                *pkt = dp;
+                ok = true;
+            }
         }
         talloc_free(data.start);
     }
@@ -89,7 +278,11 @@ static int demux_mf_fill_buffer(demuxer_t *demuxer)
         free_stream(stream);
 
     mf->curr_frame++;
-    return 1;
+
+    if (!ok)
+        MP_ERR(demuxer, "error reading image file\n");
+
+    return true;
 }
 
 // map file extension/type to a codec name
@@ -110,6 +303,10 @@ static const struct {
     { "jls",            "ljpeg" },
     { "thm",            "mjpeg" },
     { "db",             "mjpeg" },
+    { "pcd",            "photocd" },
+    { "pfm",            "pfm" },
+    { "phm",            "phm" },
+    { "hdr",            "hdr" },
     { "pcx",            "pcx" },
     { "png",            "png" },
     { "pns",            "png" },
@@ -138,8 +335,12 @@ static const struct {
     { "pix",            "brender_pix" },
     { "exr",            "exr" },
     { "pic",            "pictor" },
+    { "qoi",            "qoi" },
     { "xface",          "xface" },
     { "xwd",            "xwd" },
+    { "svg",            "svg" },
+    { "webp",           "webp" },
+    { "jxl",            "jpegxl" },
     {0}
 };
 
@@ -169,13 +370,13 @@ static const char *probe_format(mf_t *mf, char *type, enum demux_check check)
 
 static int demux_open_mf(demuxer_t *demuxer, enum demux_check check)
 {
-    sh_video_t *sh_video = NULL;
     mf_t *mf;
 
     if (strncmp(demuxer->stream->url, "mf://", 5) == 0 &&
-        demuxer->stream->type == STREAMTYPE_MF)
-        mf = open_mf_pattern(demuxer, demuxer->log, demuxer->stream->url + 5);
-    else {
+        demuxer->stream->info && strcmp(demuxer->stream->info->name, "mf") == 0)
+    {
+        mf = open_mf_pattern(demuxer, demuxer, demuxer->stream->url + 5);
+    } else {
         mf = open_mf_single(demuxer, demuxer->log, demuxer->stream->url);
         int bog = 0;
         MP_TARRAY_APPEND(mf, mf->streams, bog, demuxer->stream);
@@ -184,24 +385,34 @@ static int demux_open_mf(demuxer_t *demuxer, enum demux_check check)
     if (!mf || mf->nr_of_files < 1)
         goto error;
 
-    const char *codec = probe_format(mf, demuxer->opts->mf_type, check);
+    const char *codec = mp_map_mimetype_to_video_codec(demuxer->stream->mime_type);
+    if (!codec || (demuxer->opts->mf_type && demuxer->opts->mf_type[0]))
+        codec = probe_format(mf, demuxer->opts->mf_type, check);
     if (!codec)
         goto error;
 
     mf->curr_frame = 0;
 
     // create a new video stream header
-    struct sh_stream *sh = new_sh_stream(demuxer, STREAM_VIDEO);
-    sh_video = sh->video;
+    struct sh_stream *sh = demux_alloc_sh_stream(STREAM_VIDEO);
+    if (mf->nr_of_files == 1) {
+        MP_VERBOSE(demuxer, "Assuming this is an image format.\n");
+        sh->image = true;
+    }
 
-    sh->codec = codec;
-    sh_video->disp_w = 0;
-    sh_video->disp_h = 0;
-    sh_video->fps = demuxer->opts->mf_fps;
+    struct mp_codec_params *c = sh->codec;
+    c->codec = codec;
+    c->disp_w = 0;
+    c->disp_h = 0;
+    c->fps = demuxer->opts->mf_fps;
+    c->reliable_fps = true;
 
-    mf->sh = sh_video;
+    demux_add_sh_stream(demuxer, sh);
+
+    mf->sh = sh;
     demuxer->priv = (void *)mf;
     demuxer->seekable = true;
+    demuxer->duration = mf->nr_of_files / mf->sh->codec->fps;
 
     return 0;
 
@@ -213,26 +424,11 @@ static void demux_close_mf(demuxer_t *demuxer)
 {
 }
 
-static int demux_control_mf(demuxer_t *demuxer, int cmd, void *arg)
-{
-    mf_t *mf = demuxer->priv;
-
-    switch (cmd) {
-    case DEMUXER_CTRL_GET_TIME_LENGTH:
-        *((double *)arg) = (double)mf->nr_of_files / mf->sh->fps;
-        return DEMUXER_CTRL_OK;
-
-    default:
-        return DEMUXER_CTRL_NOTIMPL;
-    }
-}
-
 const demuxer_desc_t demuxer_desc_mf = {
     .name = "mf",
     .desc = "image files (mf)",
-    .fill_buffer = demux_mf_fill_buffer,
+    .read_packet = demux_mf_read_packet,
     .open = demux_open_mf,
     .close = demux_close_mf,
     .seek = demux_seek_mf,
-    .control = demux_control_mf,
 };

@@ -3,48 +3,61 @@
  *
  * Copyright (C) Aaron Holtzman - June 2000
  *
- * This file is part of MPlayer.
+ * This file is part of mpv.
  *
- * MPlayer is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
  *
- * MPlayer is distributed in the hope that it will be useful,
+ * mpv is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License along
- * with MPlayer; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <errno.h>
-#include "config.h"
 #include "common/msg.h"
 #include "vo.h"
-#include "video/vfcap.h"
 #include "video/mp_image.h"
+#include "osdep/timer.h"
+#include "options/m_option.h"
 
-static void draw_image(struct vo *vo, mp_image_t *mpi)
+struct priv {
+    int64_t last_vsync;
+
+    double cfg_fps;
+};
+
+static void draw_frame(struct vo *vo, struct vo_frame *frame)
 {
-    talloc_free(mpi);
 }
 
 static void flip_page(struct vo *vo)
 {
+    struct priv *p = vo->priv;
+    if (p->cfg_fps) {
+        int64_t ft = 1e9 / p->cfg_fps;
+        int64_t prev_vsync = mp_time_ns() / ft;
+        int64_t target_time = (prev_vsync + 1) * ft;
+        for (;;) {
+            int64_t now = mp_time_ns();
+            if (now >= target_time)
+                break;
+            mp_sleep_ns(target_time - now);
+        }
+    }
 }
 
-static int query_format(struct vo *vo, uint32_t format)
+static int query_format(struct vo *vo, int format)
 {
-    return VFCAP_CSP_SUPPORTED;
+    return 1;
 }
 
-static int reconfig(struct vo *vo, struct mp_image_params *params, int flags)
+static int reconfig(struct vo *vo, struct mp_image_params *params)
 {
     return 0;
 }
@@ -60,9 +73,18 @@ static int preinit(struct vo *vo)
 
 static int control(struct vo *vo, uint32_t request, void *data)
 {
+    struct priv *p = vo->priv;
+    switch (request) {
+    case VOCTRL_GET_DISPLAY_FPS:
+        if (!p->cfg_fps)
+            break;
+        *(double *)data = p->cfg_fps;
+        return VO_TRUE;
+    }
     return VO_NOTIMPL;
 }
 
+#define OPT_BASE_STRUCT struct priv
 const struct vo_driver video_out_null = {
     .description = "Null video output",
     .name = "null",
@@ -70,7 +92,13 @@ const struct vo_driver video_out_null = {
     .query_format = query_format,
     .reconfig = reconfig,
     .control = control,
-    .draw_image = draw_image,
+    .draw_frame = draw_frame,
     .flip_page = flip_page,
     .uninit = uninit,
+    .priv_size = sizeof(struct priv),
+    .options = (const struct m_option[]) {
+        {"fps", OPT_DOUBLE(cfg_fps), M_RANGE(0, 10000)},
+        {0},
+    },
+    .options_prefix = "vo-null",
 };
